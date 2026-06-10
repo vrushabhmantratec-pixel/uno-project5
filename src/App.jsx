@@ -97,6 +97,40 @@ export default function App() {
   const [myPlayerName, setMyPlayerName] = useState('You');
   
   const connectionRef = useRef(null);
+  const addCoins = (amount) => {
+    setCoins(prev => prev + amount);
+  };
+
+  const [gameState, setGameState] = useState({
+    phase: 'lobby',
+    players: [],
+    drawPile: [],
+    discardPile: [],
+    currentColor: '',
+    currentPlayer: 0,
+    direction: 1,
+    hasDrawnThisTurn: false,
+    inputDisabled: false,
+    unoCallRequired: false,
+    unoCalled: false,
+    pendingWild: null,
+    soundOn: true
+  });
+
+  const [timer, setTimer] = useState(0);
+  const [toast, setToast] = useState({ message: '', type: 'info', visible: false });
+  const [actionOverlay, setActionOverlay] = useState({ text: '', color: '', visible: false });
+
+  const toastTimeoutRef = useRef(null);
+  const actionOverlayTimeoutRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const gameStateRef = useRef(gameState);
+  const handContainerRef = useRef(null);
+
+  // Sync gameState to ref to avoid stale state in AI loops
+  useEffect(() => {
+    gameStateRef.current = gameState;
+  }, [gameState]);
 
   useEffect(() => {
     const savedStateStr = sessionStorage.getItem('uno_game_state');
@@ -226,41 +260,6 @@ export default function App() {
       sessionStorage.removeItem('uno_max_players_limit');
     }
   }, [gameState, myRoomId, myPlayerName, myPlayerIndex, isHost, lobbyPlayers, maxPlayersLimit]);
-
-  const addCoins = (amount) => {
-    setCoins(prev => prev + amount);
-  };
-
-  const [gameState, setGameState] = useState({
-    phase: 'lobby',
-    players: [],
-    drawPile: [],
-    discardPile: [],
-    currentColor: '',
-    currentPlayer: 0,
-    direction: 1,
-    hasDrawnThisTurn: false,
-    inputDisabled: false,
-    unoCallRequired: false,
-    unoCalled: false,
-    pendingWild: null,
-    soundOn: true
-  });
-
-  const [timer, setTimer] = useState(0);
-  const [toast, setToast] = useState({ message: '', type: 'info', visible: false });
-  const [actionOverlay, setActionOverlay] = useState({ text: '', color: '', visible: false });
-
-  const toastTimeoutRef = useRef(null);
-  const actionOverlayTimeoutRef = useRef(null);
-  const audioCtxRef = useRef(null);
-  const gameStateRef = useRef(gameState);
-  const handContainerRef = useRef(null);
-
-  // Sync gameState to ref to avoid stale state in AI loops
-  useEffect(() => {
-    gameStateRef.current = gameState;
-  }, [gameState]);
 
   // Round Timer effect
   useEffect(() => {
