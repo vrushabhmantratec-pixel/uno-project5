@@ -2,12 +2,44 @@ class MockHubConnection {
   constructor(url) {
     this.url = url;
     this.handlers = {};
-    this.channel = new BroadcastChannel('signalr_uno_hub');
-    this.channel.onmessage = (event) => {
-      const { method, args } = event.data;
-      if (this.handlers[method]) {
-        this.handlers[method].forEach(handler => handler(...args));
+    this.senderId = Math.random().toString(36).substring(2);
+    this.roomId = null;
+    this.socket = null;
+    
+    // Auto-detect room from URL
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    if (room) {
+      this.connectToTopic(room);
+    }
+  }
+
+  connectToTopic(roomId) {
+    if (this.socket) {
+      this.socket.close();
+    }
+    this.roomId = roomId;
+    this.socket = new WebSocket(`wss://ntfy.sh/uno-project5-${roomId}/ws`);
+    this.socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === "message") {
+          const payload = JSON.parse(data.message);
+          // Ignore our own messages
+          if (payload.senderId === this.senderId) return;
+          
+          const { method, args } = payload;
+          if (this.handlers[method]) {
+            this.handlers[method].forEach(handler => handler(...args));
+          }
+        }
+      } catch (e) {
+        // Ignore JSON parsing errors for system messages
       }
+    };
+    
+    this.socket.onerror = (err) => {
+      console.error("WebSocket error:", err);
     };
   }
 
@@ -28,15 +60,57 @@ class MockHubConnection {
   }
 
   async start() {
+    // If we didn't connect to a topic yet, try to auto-detect again
+    if (!this.roomId) {
+      const params = new URLSearchParams(window.location.search);
+      const room = params.get('room');
+      if (room) {
+        this.connectToTopic(room);
+      }
+    }
     return new Promise(resolve => setTimeout(resolve, 300));
   }
 
   async stop() {
-    this.channel.close();
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
   }
 
   invoke(method, ...args) {
-    this.channel.postMessage({ method, args });
+    // Extract roomId from arguments if we don't have it yet
+    let roomId = this.roomId;
+    if (!roomId && args && args[0]) {
+      if (typeof args[0] === 'string') {
+        roomId = args[0];
+      } else if (args[0].roomId) {
+        roomId = args[0].roomId;
+      }
+      if (roomId) {
+        this.connectToTopic(roomId);
+      }
+    }
+
+    if (!roomId) {
+      console.warn("SignalR invoke skipped: no roomId detected.", method, args);
+      return Promise.resolve();
+    }
+
+    const payload = {
+      senderId: this.senderId,
+      method,
+      args
+    };
+
+    // Post message to ntfy topic
+    fetch(`https://ntfy.sh/uno-project5-${roomId}`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }).catch(err => {
+      console.error("Failed to post message to ntfy:", err);
+    });
+
     return Promise.resolve();
   }
 }
