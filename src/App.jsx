@@ -12,7 +12,7 @@ import './App.css';
 
 /* ====== CONSTANTS ====== */
 const COLORS = ['red', 'blue', 'green', 'yellow'];
-const COLOR_HEX = { red: '#ED1C24', blue: '#00AEEF', green: '#00A651', yellow: '#FFF200' };
+const COLOR_HEX = { red: '#ff4d6d', blue: '#38bdf8', green: '#10b981', yellow: '#ffbe0b' };
 const ACTIONS = ['skip', 'reverse', 'draw2'];
 const WILDS = ['wild', 'wild4'];
 const AI_NAMES = ['Luna', 'Max', 'Zara'];
@@ -758,7 +758,7 @@ export default function App() {
     });
 
     conn.start().then(() => {
-      const colors = ['#00AEEF', '#00A651', '#FFF200', '#a855f7', '#10b981', '#f59e0b'];
+      const colors = ['#38bdf8', '#10b981', '#ffbe0b', '#a855f7', '#ff6b8b', '#fbbf24'];
       const randomColor = colors[Math.floor(Math.random() * colors.length)];
       
       conn.invoke("JoinRoom", {
@@ -1021,7 +1021,7 @@ export default function App() {
 
       if (card.value === 'skip') {
         skipNext = true;
-        showActionOverlay('SKIP!', '#ED1C24');
+        showActionOverlay('SKIP!', '#ff4d6d');
       } else if (card.value === 'reverse') {
         nextDirection = -prev.direction;
         showActionOverlay('REVERSE!', '#a855f7');
@@ -1033,9 +1033,9 @@ export default function App() {
         updatedDrawPile = drawRes.drawPile;
         updatedDiscardPile = drawRes.discardPile;
 
-        showActionOverlay('+2!', COLOR_HEX[card.color] || '#ED1C24');
+        showActionOverlay('+2!', COLOR_HEX[card.color] || '#ff4d6d');
         if (window.spawnBurstParticles) {
-          window.spawnBurstParticles(window.innerWidth / 2, window.innerHeight / 2, COLOR_HEX[card.color] || '#ED1C24', 20);
+          window.spawnBurstParticles(window.innerWidth / 2, window.innerHeight / 2, COLOR_HEX[card.color] || '#ff4d6d', 20);
         }
       } else if (card.value === 'wild4') {
         skipNext = true;
