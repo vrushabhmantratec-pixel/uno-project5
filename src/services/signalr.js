@@ -1,3 +1,42 @@
+const serializeCard = (card) => {
+  if (!card) return null;
+  return [card.id, card.color[0], card.value];
+};
+
+const deserializeCard = (arr) => {
+  if (!arr) return null;
+  const [id, colorCode, value] = arr;
+  const colorMap = { r: 'red', b: 'blue', g: 'green', y: 'yellow', w: 'wild' };
+  const color = colorMap[colorCode] || colorCode;
+  return { id, color, value };
+};
+
+const serializeGamePayload = (p) => {
+  if (!p) return null;
+  return {
+    ...p,
+    players: p.players.map(pl => ({
+      ...pl,
+      hand: pl.hand.map(serializeCard)
+    })),
+    drawPile: p.drawPile.map(serializeCard),
+    discardPile: p.discardPile.map(serializeCard)
+  };
+};
+
+const deserializeGamePayload = (p) => {
+  if (!p) return null;
+  return {
+    ...p,
+    players: p.players.map(pl => ({
+      ...pl,
+      hand: pl.hand.map(deserializeCard)
+    })),
+    drawPile: p.drawPile.map(deserializeCard),
+    discardPile: p.discardPile.map(deserializeCard)
+  };
+};
+
 class MockHubConnection {
   constructor(url) {
     this.url = url;
@@ -29,8 +68,13 @@ class MockHubConnection {
           if (payload.senderId === this.senderId) return;
           
           const { method, args } = payload;
+          let finalArgs = args;
+          if (method === "GameStarted" && args && args[0]) {
+            finalArgs = [deserializeGamePayload(args[0])];
+          }
+          
           if (this.handlers[method]) {
-            this.handlers[method].forEach(handler => handler(...args));
+            this.handlers[method].forEach(handler => handler(...finalArgs));
           }
         }
       } catch (e) {
@@ -60,7 +104,6 @@ class MockHubConnection {
   }
 
   async start() {
-    // If we didn't connect to a topic yet, try to auto-detect again
     if (!this.roomId) {
       const params = new URLSearchParams(window.location.search);
       const room = params.get('room');
@@ -79,7 +122,6 @@ class MockHubConnection {
   }
 
   invoke(method, ...args) {
-    // Extract roomId from arguments if we don't have it yet
     let roomId = this.roomId;
     if (!roomId && args && args[0]) {
       if (typeof args[0] === 'string') {
@@ -97,10 +139,15 @@ class MockHubConnection {
       return Promise.resolve();
     }
 
+    let finalArgs = args;
+    if (method === "GameStarted" && args && args[0]) {
+      finalArgs = [serializeGamePayload(args[0])];
+    }
+
     const payload = {
       senderId: this.senderId,
       method,
-      args
+      args: finalArgs
     };
 
     // Post message to ntfy topic
