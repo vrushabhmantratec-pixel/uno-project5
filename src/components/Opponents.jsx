@@ -1,13 +1,16 @@
 import React from 'react';
 
-export default function Opponents({ players, currentPlayer }) {
-  // AI players are at index 1, 2, 3
-  const aiPlayers = [players[1], players[2], players[3]];
+export default function Opponents({ players, currentPlayer, myPlayerIndex = 0 }) {
+  const otherPlayers = [];
+  const numPlayers = players.length;
+  for (let i = 1; i < numPlayers; i++) {
+    const idx = (myPlayerIndex + i) % numPlayers;
+    otherPlayers.push({ player: players[idx], index: idx });
+  }
   
   return (
     <div className="opponents" id="opponents">
-      {aiPlayers.map((p, idx) => {
-        const actualIndex = idx + 1;
+      {otherPlayers.map(({ player: p, index: actualIndex }) => {
         const isActive = currentPlayer === actualIndex;
         if (!p) return null;
         

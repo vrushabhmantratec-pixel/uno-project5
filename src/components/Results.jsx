@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
-export default function Results({ players, winnerIdx, onGoLobby, onPlayAgain }) {
-  const isHumanWin = winnerIdx === 0;
+export default function Results({ players, winnerIdx, onGoLobby, onPlayAgain, myPlayerIndex = 0 }) {
+  const isHumanWin = winnerIdx === myPlayerIndex;
   const winner = players[winnerIdx];
   const sortedPlayers = [...players].sort((a, b) => b.score - a.score);
 

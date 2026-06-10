@@ -7,6 +7,7 @@ import ActionOverlay from './components/ActionOverlay';
 import Toast from './components/Toast';
 import Results from './components/Results';
 import ParticlesCanvas from './components/ParticlesCanvas';
+import * as signalR from './services/signalr';
 import './App.css';
 
 /* ====== CONSTANTS ====== */
@@ -93,6 +94,24 @@ export default function App() {
   const [coins, setCoins] = useState(2450);
   const [gems, setGems] = useState(38);
 
+  const [joiningRoomId, setJoiningRoomId] = useState(null);
+  const [myRoomId, setMyRoomId] = useState(null);
+  const [isHost, setIsHost] = useState(false);
+  const [lobbyPlayers, setLobbyPlayers] = useState([]);
+  const [maxPlayersLimit, setMaxPlayersLimit] = useState(4);
+  const [myPlayerIndex, setMyPlayerIndex] = useState(0);
+  const [myPlayerName, setMyPlayerName] = useState('You');
+  
+  const connectionRef = useRef(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    if (room) {
+      setJoiningRoomId(room);
+    }
+  }, []);
+
   const addCoins = (amount) => {
     setCoins(prev => prev + amount);
   };
@@ -146,14 +165,21 @@ export default function App() {
 
   // AI Turn schedule effect
   useEffect(() => {
-    if (gameState.phase === 'playing' && gameState.currentPlayer !== 0) {
-      const delay = 1000 + Math.random() * 800;
-      const timerId = setTimeout(() => {
-        executeAiTurn();
-      }, delay);
-      return () => clearTimeout(timerId);
+    if (gameState.phase === 'playing') {
+      const activePlayer = gameState.players[gameState.currentPlayer];
+      if (activePlayer && !activePlayer.isHuman) {
+        // Only host runs the AI and broadcasts the move
+        const isHostTab = !myRoomId || isHost;
+        if (isHostTab) {
+          const delay = 1000 + Math.random() * 800;
+          const timerId = setTimeout(() => {
+            executeAiTurn();
+          }, delay);
+          return () => clearTimeout(timerId);
+        }
+      }
     }
-  }, [gameState.phase, gameState.currentPlayer]);
+  }, [gameState.phase, gameState.currentPlayer, isHost, myRoomId]);
 
   // Scroll player hand container to right when cards count change
   useEffect(() => {
@@ -276,6 +302,16 @@ export default function App() {
   };
 
   const startGame = () => {
+    if (connectionRef.current) {
+      connectionRef.current.stop();
+      connectionRef.current = null;
+    }
+    setMyRoomId(null);
+    setJoiningRoomId(null);
+    setIsHost(false);
+    setMyPlayerIndex(0);
+    setMyPlayerName('You');
+
     const deck = shuffle(createDeck());
     const prevPlayers = gameState.players;
     const initialPlayers = [
@@ -336,21 +372,279 @@ export default function App() {
     });
   };
 
-  const canPlayAny = (hand, activeColor, topCard) => {
-    return hand.some(c => canPlay(c, activeColor, topCard));
+  const sendMove = (action) => {
+    if (myRoomId && connectionRef.current) {
+      connectionRef.current.invoke("MovePlayed", { roomId: myRoomId, action });
+    }
   };
 
-  const humanDraw = () => {
-    if (gameState.currentPlayer !== 0 || gameState.phase !== 'playing' || gameState.inputDisabled) return;
-    if (gameState.hasDrawnThisTurn) {
-      showToast('You can only draw once per turn!', 'warn');
-      return;
+  const applyMoveAction = (action) => {
+    switch (action.type) {
+      case 'PLAY_CARD':
+        executePlayCard(action.playerIdx, action.cardIndex, action.chosenColor);
+        break;
+      case 'DRAW_CARD':
+        executeDrawCard(action.playerIdx);
+        break;
+      case 'PASS_TURN':
+        executePassTurn(action.playerIdx);
+        break;
+      case 'CALL_UNO':
+        executeCallUno(action.playerIdx);
+        break;
+      case 'DRAW_PENALTY':
+        executeDrawPenalty(action.playerIdx);
+        break;
+      case 'AI_DRAW_AND_PASS':
+        applyAiDrawAndPass(action.playerIdx);
+        break;
+      default:
+        break;
     }
+  };
 
+  const applyAiDrawAndPass = (playerIdx) => {
     setGameState(prev => {
       let currentDrawPile = [...prev.drawPile];
       let currentDiscardPile = [...prev.discardPile];
-      let nextPlayers = prev.players.map((p, idx) => idx === 0 ? { ...p, hand: [...p.hand] } : p);
+      let nextPlayers = prev.players.map((p, idx) => idx === playerIdx ? { ...p, hand: [...p.hand] } : p);
+
+      if (currentDrawPile.length === 0) {
+        if (currentDiscardPile.length > 1) {
+          const topCard = currentDiscardPile.pop();
+          currentDrawPile = shuffle(currentDiscardPile);
+          currentDiscardPile = [topCard];
+        }
+      }
+      if (currentDrawPile.length > 0) {
+        nextPlayers[playerIdx].hand.push(currentDrawPile.pop());
+      }
+      playSound('draw');
+      const nextP = getNextPlayerIndex(playerIdx, prev.direction, prev.players.length);
+      return {
+        ...prev,
+        players: nextPlayers,
+        drawPile: currentDrawPile,
+        discardPile: currentDiscardPile,
+        currentPlayer: nextP
+      };
+    });
+  };
+
+  const startGameMultiplayer = () => {
+    const deck = shuffle(createDeck());
+    const numPlayers = lobbyPlayers.length;
+    const initialPlayers = lobbyPlayers.map(p => ({
+      name: p.name,
+      hand: [],
+      isHuman: true,
+      color: p.color,
+      score: 0
+    }));
+
+    // Deal 7 cards to each player
+    for (let r = 0; r < 7; r++) {
+      for (let p = 0; p < numPlayers; p++) {
+        initialPlayers[p].hand.push(deck.pop());
+      }
+    }
+
+    // Flip first discard card
+    let firstCard;
+    do {
+      firstCard = deck.pop();
+      if (firstCard.value === 'wild4') {
+        deck.unshift(firstCard);
+        firstCard = null;
+      }
+    } while (!firstCard);
+
+    const initialDiscardPile = [firstCard];
+    const initialColor = firstCard.color === 'wild' ? COLORS[Math.floor(Math.random() * 4)] : firstCard.color;
+
+    let initialPlayer = 0;
+    let initialDirection = 1;
+
+    // Apply action effects for the first card
+    if (firstCard.value === 'skip') {
+      initialPlayer = getNextPlayerIndex(0, 1, numPlayers);
+    } else if (firstCard.value === 'reverse') {
+      initialDirection = -1;
+    } else if (firstCard.value === 'draw2') {
+      initialPlayers[0].hand.push(deck.pop(), deck.pop());
+      initialPlayer = getNextPlayerIndex(0, 1, numPlayers);
+    }
+
+    const payload = {
+      roomId: myRoomId,
+      players: initialPlayers,
+      drawPile: deck,
+      discardPile: initialDiscardPile,
+      currentColor: initialColor,
+      currentPlayer: initialPlayer,
+      direction: initialDirection
+    };
+
+    if (connectionRef.current) {
+      connectionRef.current.invoke("GameStarted", payload);
+    }
+
+    setMyPlayerIndex(0);
+    setGameState({
+      phase: 'playing',
+      players: initialPlayers,
+      drawPile: deck,
+      discardPile: initialDiscardPile,
+      currentColor: initialColor,
+      currentPlayer: initialPlayer,
+      direction: initialDirection,
+      roundScore: 0,
+      hasDrawnThisTurn: false,
+      inputDisabled: false,
+      unoCallRequired: false,
+      unoCalled: false,
+      pendingWild: null,
+      soundOn: gameState.soundOn
+    });
+  };
+
+  const handleCreateRoom = (limit) => {
+    const roomCode = Math.floor(10000 + Math.random() * 90000).toString();
+    setMyRoomId(roomCode);
+    setIsHost(true);
+    setMaxPlayersLimit(limit);
+    
+    // Update browser URL
+    window.history.pushState({}, document.title, window.location.pathname + '?room=' + roomCode);
+    
+    const hostPlayer = {
+      name: 'You (Admin)',
+      color: '#ff3366',
+      isHuman: true,
+      score: 0
+    };
+    setLobbyPlayers([hostPlayer]);
+    setMyPlayerName('You (Admin)');
+    setMyPlayerIndex(0);
+
+    const conn = new signalR.HubConnectionBuilder().withUrl("/unoHub").build();
+    connectionRef.current = conn;
+
+    conn.on("JoinRoom", (data) => {
+      setLobbyPlayers(prev => {
+        if (prev.length >= limit) return prev;
+        if (prev.some(p => p.name === data.name)) return prev;
+        const updated = [...prev, {
+          name: data.name,
+          color: data.color,
+          isHuman: true,
+          score: 0
+        }];
+        
+        conn.invoke("RoomInfoUpdate", {
+          roomId: roomCode,
+          lobbyPlayers: updated,
+          maxPlayersLimit: limit
+        });
+        
+        return updated;
+      });
+    });
+
+    conn.on("MovePlayed", (data) => {
+      if (data.roomId === roomCode) {
+        applyMoveAction(data.action);
+      }
+    });
+
+    conn.start().then(() => {
+      showToast(`Room #${roomCode} created!`, 'success');
+    });
+  };
+
+  const handleJoinRoom = (playerName) => {
+    setMyPlayerName(playerName);
+
+    const conn = new signalR.HubConnectionBuilder().withUrl("/unoHub").build();
+    connectionRef.current = conn;
+
+    conn.on("RoomInfoUpdate", (data) => {
+      if (data.roomId === joiningRoomId) {
+        setLobbyPlayers(data.lobbyPlayers);
+        setMaxPlayersLimit(data.maxPlayersLimit);
+        setMyRoomId(joiningRoomId);
+        
+        const idx = data.lobbyPlayers.findIndex(p => p.name === playerName);
+        if (idx !== -1) {
+          setMyPlayerIndex(idx);
+        }
+      }
+    });
+
+    conn.on("GameStarted", (payload) => {
+      if (payload.roomId === joiningRoomId) {
+        const idx = payload.players.findIndex(p => p.name === playerName);
+        if (idx !== -1) {
+          setMyPlayerIndex(idx);
+        }
+        setGameState({
+          phase: 'playing',
+          players: payload.players,
+          drawPile: payload.drawPile,
+          discardPile: payload.discardPile,
+          currentColor: payload.currentColor,
+          currentPlayer: payload.currentPlayer,
+          direction: payload.direction,
+          roundScore: 0,
+          hasDrawnThisTurn: false,
+          inputDisabled: false,
+          unoCallRequired: false,
+          unoCalled: false,
+          pendingWild: null,
+          soundOn: gameState.soundOn
+        });
+      }
+    });
+
+    conn.on("MovePlayed", (data) => {
+      if (data.roomId === joiningRoomId) {
+        applyMoveAction(data.action);
+      }
+    });
+
+    conn.start().then(() => {
+      const colors = ['#00AEEF', '#00A651', '#FFF200', '#a855f7', '#10b981', '#f59e0b'];
+      const randomColor = colors[Math.floor(Math.random() * colors.length)];
+      
+      conn.invoke("JoinRoom", {
+        roomId: joiningRoomId,
+        name: playerName,
+        color: randomColor
+      });
+      
+      showToast('Connecting to room...', 'info');
+    });
+  };
+
+  const handleLeaveRoom = () => {
+    if (connectionRef.current) {
+      connectionRef.current.stop();
+      connectionRef.current = null;
+    }
+    setMyRoomId(null);
+    setJoiningRoomId(null);
+    setIsHost(false);
+    setLobbyPlayers([]);
+    setMyPlayerIndex(0);
+    setMyPlayerName('You');
+    window.history.pushState({}, document.title, window.location.pathname);
+  };
+
+  const executeDrawCard = (playerIdx) => {
+    setGameState(prev => {
+      let currentDrawPile = [...prev.drawPile];
+      let currentDiscardPile = [...prev.discardPile];
+      let nextPlayers = prev.players.map((p, idx) => idx === playerIdx ? { ...p, hand: [...p.hand] } : p);
 
       if (currentDrawPile.length === 0) {
         if (currentDiscardPile.length > 1) {
@@ -366,9 +660,14 @@ export default function App() {
       }
 
       const drawnCard = currentDrawPile.pop();
-      nextPlayers[0].hand.push(drawnCard);
+      nextPlayers[playerIdx].hand.push(drawnCard);
       playSound('draw');
-      showToast(`Drew a card: ${drawnCard.color} ${drawnCard.value}`, 'info');
+      
+      if (playerIdx === myPlayerIndex) {
+        showToast(`Drew a card: ${drawnCard.color} ${drawnCard.value}`, 'info');
+      } else {
+        showToast(`${prev.players[playerIdx]?.name || 'Player'} drew a card`, 'info');
+      }
 
       const topCard = currentDiscardPile[currentDiscardPile.length - 1];
       const isPlayable = canPlay(drawnCard, prev.currentColor, topCard);
@@ -377,8 +676,7 @@ export default function App() {
         // Automatically pass after 1.5s
         setTimeout(() => {
           setGameState(latest => {
-            showToast('Card not playable. Passing turn...', 'info');
-            const nextP = getNextPlayerIndex(latest.currentPlayer, latest.direction);
+            const nextP = getNextPlayerIndex(latest.currentPlayer, latest.direction, latest.players.length);
             return {
               ...latest,
               currentPlayer: nextP,
@@ -397,7 +695,6 @@ export default function App() {
           inputDisabled: true
         };
       } else {
-        // User has a playable drawn card. They can play it or click Pass Turn.
         return {
           ...prev,
           players: nextPlayers,
@@ -410,10 +707,9 @@ export default function App() {
     });
   };
 
-  const humanPass = () => {
-    if (gameState.currentPlayer !== 0 || gameState.phase !== 'playing' || gameState.inputDisabled || !gameState.hasDrawnThisTurn) return;
+  const executePassTurn = (playerIdx) => {
     setGameState(prev => {
-      const nextP = getNextPlayerIndex(prev.currentPlayer, prev.direction);
+      const nextP = getNextPlayerIndex(prev.currentPlayer, prev.direction, prev.players.length);
       return {
         ...prev,
         currentPlayer: nextP,
@@ -423,9 +719,59 @@ export default function App() {
     });
   };
 
+  const executeCallUno = (playerIdx) => {
+    setGameState(prev => ({
+      ...prev,
+      unoCalled: true,
+      unoCallRequired: false
+    }));
+    const playerName = prev.players[playerIdx]?.name || 'Player';
+    showToast(`${playerIdx === myPlayerIndex ? 'You' : playerName} called UNO!`, 'success');
+    playSound('uno');
+    if (window.spawnBurstParticles) {
+      window.spawnBurstParticles(window.innerWidth / 2, window.innerHeight * 0.6, '#FFD700', 25);
+    }
+  };
+
+  const executeDrawPenalty = (playerIdx) => {
+    setGameState(prev => {
+      let drawPileCopy = [...prev.drawPile];
+      let discardPileCopy = [...prev.discardPile];
+      let playersCopy = prev.players.map((p, idx) => idx === playerIdx ? { ...p, hand: [...p.hand] } : p);
+      const drawRes = drawCardsHelper(playerIdx, 2, playersCopy, drawPileCopy, discardPileCopy);
+      return {
+        ...prev,
+        players: drawRes.players,
+        drawPile: drawRes.drawPile,
+        discardPile: drawRes.discardPile,
+        unoCallRequired: false
+      };
+    });
+  };
+
+  const handleDrawClick = () => {
+    if (gameState.currentPlayer !== myPlayerIndex || gameState.phase !== 'playing' || gameState.inputDisabled) return;
+    if (gameState.hasDrawnThisTurn) {
+      showToast('You can only draw once per turn!', 'warn');
+      return;
+    }
+    executeDrawCard(myPlayerIndex);
+    sendMove({ type: 'DRAW_CARD', playerIdx: myPlayerIndex });
+  };
+
+  const handlePassClick = () => {
+    if (gameState.currentPlayer !== myPlayerIndex || gameState.phase !== 'playing' || gameState.inputDisabled || !gameState.hasDrawnThisTurn) return;
+    executePassTurn(myPlayerIndex);
+    sendMove({ type: 'PASS_TURN', playerIdx: myPlayerIndex });
+  };
+
+  const canPlayAny = (hand, activeColor, topCard) => {
+    return hand.some(c => canPlay(c, activeColor, topCard));
+  };
+
   const handleCardClick = (index) => {
-    if (gameState.currentPlayer !== 0 || gameState.phase !== 'playing' || gameState.inputDisabled) return;
-    const card = gameState.players[0].hand[index];
+    if (gameState.currentPlayer !== myPlayerIndex || gameState.phase !== 'playing' || gameState.inputDisabled) return;
+    const card = gameState.players[myPlayerIndex].hand[index];
     if (!card) return;
 
     const topCard = gameState.discardPile[gameState.discardPile.length - 1];
@@ -438,29 +784,23 @@ export default function App() {
       setGameState(prev => ({ ...prev, pendingWild: index }));
       return;
     }
-    executePlayCard(0, index);
+    executePlayCard(myPlayerIndex, index);
+    sendMove({ type: 'PLAY_CARD', playerIdx: myPlayerIndex, cardIndex: index });
   };
 
   const handlePickColor = (color) => {
     if (gameState.pendingWild !== null) {
       const idx = gameState.pendingWild;
       setGameState(prev => ({ ...prev, pendingWild: null }));
-      executePlayCard(0, idx, color);
+      executePlayCard(myPlayerIndex, idx, color);
+      sendMove({ type: 'PLAY_CARD', playerIdx: myPlayerIndex, cardIndex: idx, chosenColor: color });
     }
   };
 
   const callUno = () => {
-    if (gameState.unoCallRequired) {
-      setGameState(prev => ({
-        ...prev,
-        unoCalled: true,
-        unoCallRequired: false
-      }));
-      showToast('UNO!', 'success');
-      playSound('uno');
-      if (window.spawnBurstParticles) {
-        window.spawnBurstParticles(window.innerWidth / 2, window.innerHeight * 0.6, '#FFD700', 25);
-      }
+    if (gameState.unoCallRequired && gameState.currentPlayer === myPlayerIndex) {
+      executeCallUno(myPlayerIndex);
+      sendMove({ type: 'CALL_UNO', playerIdx: myPlayerIndex });
     }
   };
 
@@ -492,28 +832,18 @@ export default function App() {
 
       // Check UNO
       if (hand.length === 1) {
-        if (player.isHuman) {
+        if (playerIdx === myPlayerIndex) {
           setTimeout(() => {
             setGameState(latest => {
               if (latest.unoCallRequired && !latest.unoCalled) {
                 showToast('Forgot to call UNO! Draw 2 cards', 'warn');
-                let drawPileCopy = [...latest.drawPile];
-                let discardPileCopy = [...latest.discardPile];
-                let playersCopy = latest.players.map((p, idx) => idx === 0 ? { ...p, hand: [...p.hand] } : p);
-
-                const drawRes = drawCardsHelper(0, 2, playersCopy, drawPileCopy, discardPileCopy);
-                return {
-                  ...latest,
-                  players: drawRes.players,
-                  drawPile: drawRes.drawPile,
-                  discardPile: drawRes.discardPile,
-                  unoCallRequired: false
-                };
+                executeDrawPenalty(playerIdx);
+                sendMove({ type: 'DRAW_PENALTY', playerIdx });
               }
               return latest;
             });
           }, 3000);
-        } else {
+        } else if (!player.isHuman) {
           setTimeout(() => showToast(`${player.name} calls UNO!`, 'info'), 500);
         }
       }
@@ -543,7 +873,7 @@ export default function App() {
         showActionOverlay('REVERSE!', '#a855f7');
       } else if (card.value === 'draw2') {
         skipNext = true;
-        const nextPIndex = getNextPlayerIndex(playerIdx, card.value === 'reverse' ? -prev.direction : prev.direction);
+        const nextPIndex = getNextPlayerIndex(playerIdx, card.value === 'reverse' ? -prev.direction : prev.direction, prev.players.length);
         const drawRes = drawCardsHelper(nextPIndex, 2, nextPlayers, updatedDrawPile, updatedDiscardPile);
         nextPlayers = drawRes.players;
         updatedDrawPile = drawRes.drawPile;
@@ -555,7 +885,7 @@ export default function App() {
         }
       } else if (card.value === 'wild4') {
         skipNext = true;
-        const nextPIndex = getNextPlayerIndex(playerIdx, prev.direction);
+        const nextPIndex = getNextPlayerIndex(playerIdx, prev.direction, prev.players.length);
         const drawRes = drawCardsHelper(nextPIndex, 4, nextPlayers, updatedDrawPile, updatedDiscardPile);
         nextPlayers = drawRes.players;
         updatedDrawPile = drawRes.drawPile;
@@ -580,9 +910,9 @@ export default function App() {
       playSound(card.value);
 
       // Advance turn
-      let nextP = getNextPlayerIndex(playerIdx, nextDirection);
+      let nextP = getNextPlayerIndex(playerIdx, nextDirection, prev.players.length);
       if (skipNext) {
-        nextP = getNextPlayerIndex(nextP, nextDirection);
+        nextP = getNextPlayerIndex(nextP, nextDirection, prev.players.length);
       }
 
       return {
@@ -596,14 +926,14 @@ export default function App() {
         roundScore: nextRoundScore,
         hasDrawnThisTurn: false,
         inputDisabled: false,
-        unoCallRequired: hand.length === 1 && playerIdx === 0,
+        unoCallRequired: hand.length === 1 && playerIdx === myPlayerIndex,
         unoCalled: false
       };
     });
   };
 
   const triggerEndGame = (winnerIdx, finalPlayers, finalRoundScore) => {
-    const isHumanWin = winnerIdx === 0;
+    const isHumanWin = winnerIdx === myPlayerIndex;
 
     const updatedPlayers = finalPlayers.map((p, i) => {
       let pts = 0;
@@ -656,7 +986,10 @@ export default function App() {
         }
 
         if (currentDrawPile.length === 0) {
-          const nextP = getNextPlayerIndex(pi, prev.direction);
+          const nextP = getNextPlayerIndex(pi, prev.direction, prev.players.length);
+          if (myRoomId) {
+            sendMove({ type: 'AI_DRAW_AND_PASS', playerIdx: pi });
+          }
           return {
             ...prev,
             currentPlayer: nextP
@@ -673,11 +1006,17 @@ export default function App() {
           setTimeout(() => {
             const chosenColor = drawnCard.color === 'wild' ? aiChooseColor(pi, nextPlayers) : null;
             executePlayCard(pi, nextPlayers[pi].hand.length - 1, chosenColor);
+            if (myRoomId) {
+              sendMove({ type: 'PLAY_CARD', playerIdx: pi, cardIndex: nextPlayers[pi].hand.length - 1, chosenColor });
+            }
           }, 600);
         } else {
           setTimeout(() => {
             setGameState(latest => {
-              const nextP = getNextPlayerIndex(latest.currentPlayer, latest.direction);
+              const nextP = getNextPlayerIndex(latest.currentPlayer, latest.direction, latest.players.length);
+              if (myRoomId) {
+                sendMove({ type: 'AI_DRAW_AND_PASS', playerIdx: pi });
+              }
               return {
                 ...latest,
                 currentPlayer: nextP
@@ -707,6 +1046,9 @@ export default function App() {
       const chosen = playable[0];
       const chosenColor = chosen.card.color === 'wild' ? aiChooseColor(pi, latestState.players) : null;
       executePlayCard(pi, chosen.index, chosenColor);
+      if (myRoomId) {
+        sendMove({ type: 'PLAY_CARD', playerIdx: pi, cardIndex: chosen.index, chosenColor });
+      }
     }
   };
 
@@ -732,9 +1074,9 @@ export default function App() {
   };
 
   // Human hand list
-  const humanHand = gameState.players[0]?.hand || [];
+  const humanHand = gameState.players[myPlayerIndex]?.hand || [];
   const topDiscardCard = gameState.discardPile[gameState.discardPile.length - 1];
-  const isMyTurn = gameState.currentPlayer === 0 && gameState.phase === 'playing';
+  const isMyTurn = gameState.currentPlayer === myPlayerIndex && gameState.phase === 'playing';
 
   return (
     <>
@@ -745,6 +1087,15 @@ export default function App() {
           gems={gems}
           onAddCoins={addCoins}
           showToast={showToast}
+          myRoomId={myRoomId}
+          isHost={isHost}
+          lobbyPlayers={lobbyPlayers}
+          maxPlayersLimit={maxPlayersLimit}
+          joiningRoomId={joiningRoomId}
+          onJoinRoom={handleJoinRoom}
+          onCreateRoom={handleCreateRoom}
+          onStartMultiplayerGame={startGameMultiplayer}
+          onLeaveRoom={handleLeaveRoom}
         />
       )}
 
@@ -752,7 +1103,7 @@ export default function App() {
         <div id="game" className="screen">
           <div className="game-table">
             <div className="game-top">
-              <button className="game-exit" onClick={exitGame} aria-label="Exit game">
+              <button className="game-exit" onClick={myRoomId ? handleLeaveRoom : exitGame} aria-label="Exit game">
                 <i className="fas fa-arrow-left"></i>
               </button>
               <div className={`direction-indicator ${gameState.direction === -1 ? 'ccw' : ''}`} id="dirIndicator">
@@ -773,11 +1124,11 @@ export default function App() {
               </div>
             </div>
 
-            <Opponents players={gameState.players} currentPlayer={gameState.currentPlayer} />
+            <Opponents players={gameState.players} currentPlayer={gameState.currentPlayer} myPlayerIndex={myPlayerIndex} />
 
             <div className="center-area">
               <div className="pile">
-                <div className="draw-pile" id="drawPile" onClick={humanDraw} aria-label="Draw card">
+                <div className="draw-pile" id="drawPile" onClick={handleDrawClick} aria-label="Draw card">
                   <div className="card card-back lg">
                     <div className="card-inner">
                       <div className="card-back-pattern">UNO</div>
@@ -807,8 +1158,10 @@ export default function App() {
             <div className="player-area">
               <div className="player-status">
                 <div className="player-status-left">
-                  <div className="your-avatar">Y</div>
-                  <span className="your-name">You</span>
+                  <div className="your-avatar" style={{ backgroundColor: gameState.players[myPlayerIndex]?.color || 'var(--accent)' }}>
+                    {myPlayerName[0]}
+                  </div>
+                  <span className="your-name">{myPlayerName}</span>
                   <span className="your-cards-count" id="yourCardCount">
                     {humanHand.length} card{humanHand.length !== 1 ? 's' : ''}
                   </span>
@@ -816,7 +1169,7 @@ export default function App() {
                     <button 
                       className="daily-claim" 
                       style={{ padding: '4px 10px', background: 'var(--accent)', color: '#fff', fontSize: '11px', marginLeft: '10px', height: 'auto', border: 'none', borderRadius: '12px' }}
-                      onClick={humanPass}
+                      onClick={handlePassClick}
                     >
                       PASS
                     </button>
@@ -858,7 +1211,8 @@ export default function App() {
           players={gameState.players}
           winnerIdx={gameState.players.findIndex(p => p.hand.length === 0)}
           onGoLobby={goLobby}
-          onPlayAgain={startGame}
+          onPlayAgain={myRoomId ? (isHost ? startGameMultiplayer : () => showToast('Waiting for host to restart...', 'info')) : startGame}
+          myPlayerIndex={myPlayerIndex}
         />
       )}
 
