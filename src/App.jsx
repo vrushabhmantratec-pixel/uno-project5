@@ -19,12 +19,6 @@ const AI_NAMES = ['Luna', 'Max', 'Zara'];
 const AI_COLORS = ['#a855f7', '#3b82f6', '#10b981'];
 
 /* ====== HELPER FUNCTIONS ====== */
-const cardPoints = (card) => {
-  if (card.value === 'wild' || card.value === 'wild4') return 50;
-  if (ACTIONS.includes(card.value)) return 20;
-  return parseInt(card.value) || 0;
-};
-
 const getNextPlayerIndex = (current, dir, numPlayers = 4) => {
   let next = current + dir;
   if (next >= numPlayers) next = 0;
@@ -105,12 +99,133 @@ export default function App() {
   const connectionRef = useRef(null);
 
   useEffect(() => {
+    const savedStateStr = sessionStorage.getItem('uno_game_state');
+    const savedRoomId = sessionStorage.getItem('uno_room_id');
+    const savedMyPlayerName = sessionStorage.getItem('uno_my_player_name');
+    const savedMyPlayerIndex = sessionStorage.getItem('uno_my_player_index');
+    const savedIsHost = sessionStorage.getItem('uno_is_host');
+    const savedLobbyPlayers = sessionStorage.getItem('uno_lobby_players');
+    const savedMaxPlayersLimit = sessionStorage.getItem('uno_max_players_limit');
+
+    if (savedStateStr && savedRoomId && savedMyPlayerName && savedMyPlayerIndex !== null) {
+      try {
+        const parsedState = JSON.parse(savedStateStr);
+        const parsedLobbyPlayers = savedLobbyPlayers ? JSON.parse(savedLobbyPlayers) : [];
+        const isHostPlayer = savedIsHost === 'true';
+        const playerIdx = Number(savedMyPlayerIndex);
+        const limit = Number(savedMaxPlayersLimit) || 4;
+
+        // Re-establish connection
+        const conn = new signalR.HubConnectionBuilder().withUrl("/unoHub").build();
+        connectionRef.current = conn;
+
+        if (isHostPlayer) {
+          conn.on("JoinRoom", (data) => {
+            setLobbyPlayers(prev => {
+              if (prev.length >= limit) return prev;
+              if (prev.some(p => p.name === data.name)) return prev;
+              const updated = [...prev, {
+                name: data.name,
+                color: data.color,
+                isHuman: true
+              }];
+              conn.invoke("RoomInfoUpdate", {
+                roomId: savedRoomId,
+                lobbyPlayers: updated,
+                maxPlayersLimit: limit
+              });
+              return updated;
+            });
+          });
+        } else {
+          conn.on("RoomInfoUpdate", (data) => {
+            if (data.roomId === savedRoomId) {
+              setLobbyPlayers(data.lobbyPlayers);
+              setMaxPlayersLimit(data.maxPlayersLimit);
+            }
+          });
+          conn.on("GameStarted", (payload) => {
+            if (payload.roomId === savedRoomId) {
+              const idx = payload.players.findIndex(p => p.name === savedMyPlayerName);
+              if (idx !== -1) {
+                setMyPlayerIndex(idx);
+              }
+              setGameState({
+                phase: 'playing',
+                players: payload.players,
+                drawPile: payload.drawPile,
+                discardPile: payload.discardPile,
+                currentColor: payload.currentColor,
+                currentPlayer: payload.currentPlayer,
+                direction: payload.direction,
+                hasDrawnThisTurn: false,
+                inputDisabled: false,
+                unoCallRequired: false,
+                unoCalled: false,
+                pendingWild: null,
+                soundOn: true
+              });
+            }
+          });
+        }
+
+        conn.on("MovePlayed", (data) => {
+          if (data.roomId === savedRoomId) {
+            applyMoveAction(data.action);
+          }
+        });
+
+        conn.on("PlayerLeft", (data) => {
+          if (data.roomId === savedRoomId) {
+            handleOpponentLeft(data.playerIdx, data.playerName);
+          }
+        });
+
+        conn.start().then(() => {
+          showToast('Reconnected to room successfully!', 'success');
+        });
+
+        // Set states
+        setMyRoomId(savedRoomId);
+        setMyPlayerName(savedMyPlayerName);
+        setMyPlayerIndex(playerIdx);
+        setIsHost(isHostPlayer);
+        setLobbyPlayers(parsedLobbyPlayers);
+        setMaxPlayersLimit(limit);
+        setGameState(parsedState);
+        return;
+      } catch (err) {
+        console.error("Error restoring session:", err);
+      }
+    }
+
     const params = new URLSearchParams(window.location.search);
     const room = params.get('room');
     if (room) {
       setJoiningRoomId(room);
     }
   }, []);
+
+  // Session Sync Effect
+  useEffect(() => {
+    if (gameState.phase === 'playing' || gameState.phase === 'gameOver' || gameState.phase === 'results') {
+      sessionStorage.setItem('uno_game_state', JSON.stringify(gameState));
+      sessionStorage.setItem('uno_room_id', myRoomId || '');
+      sessionStorage.setItem('uno_my_player_name', myPlayerName);
+      sessionStorage.setItem('uno_my_player_index', String(myPlayerIndex));
+      sessionStorage.setItem('uno_is_host', String(isHost));
+      sessionStorage.setItem('uno_lobby_players', JSON.stringify(lobbyPlayers));
+      sessionStorage.setItem('uno_max_players_limit', String(maxPlayersLimit));
+    } else if (gameState.phase === 'lobby') {
+      sessionStorage.removeItem('uno_game_state');
+      sessionStorage.removeItem('uno_room_id');
+      sessionStorage.removeItem('uno_my_player_name');
+      sessionStorage.removeItem('uno_my_player_index');
+      sessionStorage.removeItem('uno_is_host');
+      sessionStorage.removeItem('uno_lobby_players');
+      sessionStorage.removeItem('uno_max_players_limit');
+    }
+  }, [gameState, myRoomId, myPlayerName, myPlayerIndex, isHost, lobbyPlayers, maxPlayersLimit]);
 
   const addCoins = (amount) => {
     setCoins(prev => prev + amount);
@@ -124,7 +239,6 @@ export default function App() {
     currentColor: '',
     currentPlayer: 0,
     direction: 1,
-    roundScore: 0,
     hasDrawnThisTurn: false,
     inputDisabled: false,
     unoCallRequired: false,
@@ -313,12 +427,11 @@ export default function App() {
     setMyPlayerName('You');
 
     const deck = shuffle(createDeck());
-    const prevPlayers = gameState.players;
     const initialPlayers = [
-      { name: 'You', hand: [], isHuman: true, color: '#ff3366', score: prevPlayers.length > 0 ? prevPlayers[0].score : 0 },
-      { name: AI_NAMES[0], hand: [], isHuman: false, color: AI_COLORS[0], score: prevPlayers.length > 0 ? prevPlayers[1].score : 0 },
-      { name: AI_NAMES[1], hand: [], isHuman: false, color: AI_COLORS[1], score: prevPlayers.length > 0 ? prevPlayers[2].score : 0 },
-      { name: AI_NAMES[2], hand: [], isHuman: false, color: AI_COLORS[2], score: prevPlayers.length > 0 ? prevPlayers[3].score : 0 }
+      { name: 'You', hand: [], isHuman: true, color: '#ff3366' },
+      { name: AI_NAMES[0], hand: [], isHuman: false, color: AI_COLORS[0] },
+      { name: AI_NAMES[1], hand: [], isHuman: false, color: AI_COLORS[1] },
+      { name: AI_NAMES[2], hand: [], isHuman: false, color: AI_COLORS[2] }
     ];
 
     // Deal 7 cards
@@ -362,7 +475,6 @@ export default function App() {
       currentColor: initialColor,
       currentPlayer: initialPlayer,
       direction: initialDirection,
-      roundScore: 0,
       hasDrawnThisTurn: false,
       inputDisabled: false,
       unoCallRequired: false,
@@ -431,6 +543,32 @@ export default function App() {
     });
   };
 
+  const handleOpponentLeft = (leftPlayerIdx, leftPlayerName) => {
+    showToast(`${leftPlayerName} left the game! A bot has taken over.`, 'info');
+    
+    setGameState(prev => {
+      if (!prev.players) return prev;
+      const nextPlayers = prev.players.map((p, i) => 
+        i === leftPlayerIdx ? { ...p, isHuman: false, name: `${p.name} (Bot)` } : p
+      );
+      
+      // Host migration check
+      if (leftPlayerIdx === 0) {
+        const firstHumanIdx = nextPlayers.findIndex(p => p.isHuman);
+        const savedMyIndex = Number(sessionStorage.getItem('uno_my_player_index') || myPlayerIndex);
+        if (firstHumanIdx === savedMyIndex) {
+          setIsHost(true);
+          setTimeout(() => showToast("You are now the host of this room.", "info"), 100);
+        }
+      }
+      
+      return {
+        ...prev,
+        players: nextPlayers
+      };
+    });
+  };
+
   const startGameMultiplayer = () => {
     const deck = shuffle(createDeck());
     const numPlayers = lobbyPlayers.length;
@@ -438,8 +576,7 @@ export default function App() {
       name: p.name,
       hand: [],
       isHuman: true,
-      color: p.color,
-      score: 0
+      color: p.color
     }));
 
     // Deal 7 cards to each player
@@ -498,7 +635,6 @@ export default function App() {
       currentColor: initialColor,
       currentPlayer: initialPlayer,
       direction: initialDirection,
-      roundScore: 0,
       hasDrawnThisTurn: false,
       inputDisabled: false,
       unoCallRequired: false,
@@ -520,8 +656,7 @@ export default function App() {
     const hostPlayer = {
       name: 'You (Admin)',
       color: '#ff3366',
-      isHuman: true,
-      score: 0
+      isHuman: true
     };
     setLobbyPlayers([hostPlayer]);
     setMyPlayerName('You (Admin)');
@@ -537,8 +672,7 @@ export default function App() {
         const updated = [...prev, {
           name: data.name,
           color: data.color,
-          isHuman: true,
-          score: 0
+          isHuman: true
         }];
         
         conn.invoke("RoomInfoUpdate", {
@@ -554,6 +688,12 @@ export default function App() {
     conn.on("MovePlayed", (data) => {
       if (data.roomId === roomCode) {
         applyMoveAction(data.action);
+      }
+    });
+
+    conn.on("PlayerLeft", (data) => {
+      if (data.roomId === roomCode) {
+        handleOpponentLeft(data.playerIdx, data.playerName);
       }
     });
 
@@ -595,7 +735,6 @@ export default function App() {
           currentColor: payload.currentColor,
           currentPlayer: payload.currentPlayer,
           direction: payload.direction,
-          roundScore: 0,
           hasDrawnThisTurn: false,
           inputDisabled: false,
           unoCallRequired: false,
@@ -609,6 +748,12 @@ export default function App() {
     conn.on("MovePlayed", (data) => {
       if (data.roomId === joiningRoomId) {
         applyMoveAction(data.action);
+      }
+    });
+
+    conn.on("PlayerLeft", (data) => {
+      if (data.roomId === joiningRoomId) {
+        handleOpponentLeft(data.playerIdx, data.playerName);
       }
     });
 
@@ -627,6 +772,11 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
+    if (gameState.phase === 'playing' || gameState.phase === 'gameOver') {
+      if (connectionRef.current && myRoomId) {
+        connectionRef.current.invoke("PlayerLeft", { roomId: myRoomId, playerIdx: myPlayerIndex, playerName: myPlayerName });
+      }
+    }
     if (connectionRef.current) {
       connectionRef.current.stop();
       connectionRef.current = null;
@@ -637,6 +787,13 @@ export default function App() {
     setLobbyPlayers([]);
     setMyPlayerIndex(0);
     setMyPlayerName('You');
+    sessionStorage.removeItem('uno_game_state');
+    sessionStorage.removeItem('uno_room_id');
+    sessionStorage.removeItem('uno_my_player_name');
+    sessionStorage.removeItem('uno_my_player_index');
+    sessionStorage.removeItem('uno_is_host');
+    sessionStorage.removeItem('uno_lobby_players');
+    sessionStorage.removeItem('uno_max_players_limit');
     window.history.pushState({}, document.title, window.location.pathname);
   };
 
@@ -826,8 +983,6 @@ export default function App() {
         nextColor = card.color;
       }
 
-      const pts = cardPoints(card);
-      const nextRoundScore = prev.roundScore + pts;
       let nextPlayers = prev.players.map((p, idx) => idx === playerIdx ? { ...p, hand } : p);
 
       // Check UNO
@@ -850,14 +1005,13 @@ export default function App() {
 
       // Check Win
       if (hand.length === 0) {
-        setTimeout(() => triggerEndGame(playerIdx, nextPlayers, nextRoundScore), 800);
+        setTimeout(() => triggerEndGame(playerIdx, nextPlayers), 800);
         return {
           ...prev,
           phase: 'gameOver',
           players: nextPlayers,
           discardPile: updatedDiscardPile,
-          currentColor: nextColor,
-          roundScore: nextRoundScore
+          currentColor: nextColor
         };
       }
 
@@ -923,7 +1077,6 @@ export default function App() {
         currentColor: nextColor,
         currentPlayer: nextP,
         direction: nextDirection,
-        roundScore: nextRoundScore,
         hasDrawnThisTurn: false,
         inputDisabled: false,
         unoCallRequired: hand.length === 1 && playerIdx === myPlayerIndex,
@@ -932,17 +1085,8 @@ export default function App() {
     });
   };
 
-  const triggerEndGame = (winnerIdx, finalPlayers, finalRoundScore) => {
+  const triggerEndGame = (winnerIdx, finalPlayers) => {
     const isHumanWin = winnerIdx === myPlayerIndex;
-
-    const updatedPlayers = finalPlayers.map((p, i) => {
-      let pts = 0;
-      p.hand.forEach(c => {
-        pts += cardPoints(c);
-      });
-      const change = (i === winnerIdx) ? finalRoundScore : -pts;
-      return { ...p, score: p.score + change };
-    });
 
     const rewardCoins = isHumanWin ? 150 : 30;
     setCoins(prev => prev + rewardCoins);
@@ -950,7 +1094,7 @@ export default function App() {
     setGameState(prev => ({
       ...prev,
       phase: 'results',
-      players: updatedPlayers
+      players: finalPlayers
     }));
 
     if (isHumanWin && window.spawnConfetti) {

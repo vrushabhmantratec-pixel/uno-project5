@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 export default function Results({ players, winnerIdx, onGoLobby, onPlayAgain, myPlayerIndex = 0 }) {
   const isHumanWin = winnerIdx === myPlayerIndex;
   const winner = players[winnerIdx];
-  const sortedPlayers = [...players].sort((a, b) => b.score - a.score);
+  const sortedPlayers = [...players].sort((a, b) => (a.hand?.length || 0) - (b.hand?.length || 0));
 
   const rewardCoins = isHumanWin ? 150 : 30;
   const rewardXP = isHumanWin ? 45 : 15;
@@ -37,8 +37,7 @@ export default function Results({ players, winnerIdx, onGoLobby, onPlayAgain, my
               </div>
               <div className="result-name">{p.name}</div>
               <div className="result-score">
-                {p.score > 0 ? '+' : ''}
-                {p.score}
+                {p.hand?.length === 0 ? 'Winner' : `${p.hand?.length || 0} card${p.hand?.length !== 1 ? 's' : ''}`}
               </div>
             </div>
           );
